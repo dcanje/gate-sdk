@@ -85,7 +85,7 @@ app.get('/ventas', requireRole('vendedor', 'supervisor'), handler);
 ## Variables de entorno
 
 ```env
-GATE_URL=https://dev-gate-xxx.us-central1.run.app
+GATE_URL=https://gate.tu-empresa.com
 GATE_APP_ID=mi-aplicacion
 GATE_PUBLIC_KEY=-----BEGIN PUBLIC KEY-----\nMIIBI...
 ```
@@ -118,6 +118,30 @@ req.user disponible con email, nombre, rol
         ▼
 Requests siguientes: Authorization: Bearer JWT
 ```
+
+### Recomendación de seguridad: limpiar `gate_token` del query
+
+El SDK acepta el token via `?gate_token=...` para el redirect post-login. Una vez consumido, conviene que tu app limpie el query string para que el JWT no quede en:
+
+- el historial del navegador,
+- logs de access del proxy/Cloud Run (que loguean URLs completas),
+- el `Referer` de la próxima request a un dominio externo.
+
+Patrón recomendado en la app consumidora, después del middleware de Gate:
+
+```javascript
+app.use(gate);
+
+app.use(function (req, res, next) {
+  if (req.query.gate_token) {
+    var clean = req.path; // o req.originalUrl sin gate_token
+    return res.redirect(clean);
+  }
+  next();
+});
+```
+
+Tras el redirect, el navegador queda en una URL limpia y los requests siguientes usan el header `Authorization: Bearer ...`.
 
 ## Más información
 
