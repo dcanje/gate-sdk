@@ -1,0 +1,18 @@
+{
+  "name": "gate-sdk",
+  "version": "1.0.0",
+  "description": "SDK para integrar Gate auth en aplicaciones Express",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest --verbose"
+  },
+  "author": "Apprecio/Dcanje",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2",
+    "axios": "^1.7.9"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}
