@@ -186,14 +186,34 @@ describe('createGateMiddleware: manejo del callback ?gate_token=...', () => {
     });
   });
 
-  test('extrae gate_token del query a cookie httpOnly y redirige a path limpio', () => {
+  function validToken(extra) {
+    return jwt.sign(
+      Object.assign({ email: 'u@apprecio.com', role: 'admin', appId: 'mi-app' }, extra || {}),
+      privateKey, { algorithm: 'RS256', expiresIn: '1h' }
+    );
+  }
+
+  test('rechaza con 401 si el gate_token del query tiene firma inválida (anti session fixation)', () => {
     const m = mockReqRes({
       headers: { accept: 'text/html' },
       query: { gate_token: 'eyJ.fake.token' },
       originalUrl: '/dashboard?gate_token=eyJ.fake.token',
     });
     middleware(m.req, m.res, m.next);
-    expect(m.setHeaders['Set-Cookie']).toMatch(/^gate_token=eyJ\.fake\.token/);
+    expect(m.statusCode).toBe(401);
+    expect(m.setHeaders['Set-Cookie']).toBeUndefined();
+    expect(m.redirectArg).toBeNull();
+  });
+
+  test('JWT válido: extrae gate_token a cookie httpOnly y redirige a path limpio', () => {
+    const tok = validToken();
+    const m = mockReqRes({
+      headers: { accept: 'text/html' },
+      query: { gate_token: tok },
+      originalUrl: '/dashboard?gate_token=' + tok,
+    });
+    middleware(m.req, m.res, m.next);
+    expect(m.setHeaders['Set-Cookie']).toMatch(/^gate_token=/);
     expect(m.setHeaders['Set-Cookie']).toMatch(/HttpOnly/);
     expect(m.setHeaders['Set-Cookie']).toMatch(/SameSite=Lax/);
     expect(m.setHeaders['Set-Cookie']).not.toMatch(/Secure/);
@@ -202,20 +222,22 @@ describe('createGateMiddleware: manejo del callback ?gate_token=...', () => {
     expect(m.redirectArg).toBe('/dashboard');
   });
 
-  test('Secure cookie cuando viene con X-Forwarded-Proto: https (detrás de proxy)', () => {
+  test('JWT válido + X-Forwarded-Proto: https → cookie con Secure', () => {
+    const tok = validToken();
     const m = mockReqRes({
       headers: { accept: 'text/html', 'x-forwarded-proto': 'https' },
-      query: { gate_token: 'eyJ.x.y' },
-      originalUrl: '/?gate_token=eyJ.x.y',
+      query: { gate_token: tok },
+      originalUrl: '/?gate_token=' + tok,
     });
     middleware(m.req, m.res, m.next);
     expect(m.setHeaders['Set-Cookie']).toMatch(/Secure/);
   });
 
   test('preserva los otros query params al limpiar gate_token', () => {
+    const tok = validToken();
     const m = mockReqRes({
-      query: { gate_token: 'eyJ.x.y', from: '2026-01-01', to: '2026-12-31' },
-      originalUrl: '/reportes?gate_token=eyJ.x.y&from=2026-01-01&to=2026-12-31',
+      query: { gate_token: tok, from: '2026-01-01', to: '2026-12-31' },
+      originalUrl: '/reportes?gate_token=' + tok + '&from=2026-01-01&to=2026-12-31',
     });
     middleware(m.req, m.res, m.next);
     expect(m.redirectArg).not.toMatch(/gate_token/);
@@ -224,9 +246,10 @@ describe('createGateMiddleware: manejo del callback ?gate_token=...', () => {
   });
 
   test('open redirect protection: //evil.com en originalUrl se normaliza a un solo /', () => {
+    const tok = validToken();
     const m = mockReqRes({
-      query: { gate_token: 'eyJ.x.y' },
-      originalUrl: '//evil.com/path?gate_token=eyJ.x.y',
+      query: { gate_token: tok },
+      originalUrl: '//evil.com/path?gate_token=' + tok,
     });
     middleware(m.req, m.res, m.next);
     expect(m.redirectArg.startsWith('/')).toBe(true);

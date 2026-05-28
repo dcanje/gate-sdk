@@ -59,11 +59,19 @@ async function createGateMiddleware(options) {
   var failOpenOnNetworkError = options.failOpenOnNetworkError === true;
 
   return function gateAuth(req, res, next) {
-    // 0. Si GATE redirige al callback con ?gate_token=..., guardamos el token
-    //    en una cookie httpOnly y redirigimos al mismo path SIN el query. Asi
-    //    el JWT no queda en barra de direcciones, history del browser, logs
-    //    de proxy ni en el header Referer de recursos externos.
+    // 0. Si GATE redirige al callback con ?gate_token=..., verificamos primero
+    //    la firma del JWT — sin esto un atacante podría inducir al usuario a
+    //    abrir un link con un JWT falso (o con su propio JWT, session fixation)
+    //    y dejarlo seteado en su browser. Solo si el JWT es válido lo guardamos
+    //    como cookie httpOnly y redirigimos al mismo path SIN el query (para
+    //    que el JWT no quede en barra de direcciones, history, logs ni Referer).
     if (req.query && req.query.gate_token) {
+      try {
+        jwt.verify(req.query.gate_token, publicKey, { algorithms: ['RS256'] });
+      } catch (err) {
+        // No setear cookie con un token invalido / fabricado por el atacante.
+        return res.status(401).json({ error: 'Token invalido' });
+      }
       setearCookieToken(res, req.query.gate_token, esConexionSegura(req));
       var cleanQuery = Object.assign({}, req.query);
       delete cleanQuery.gate_token;
