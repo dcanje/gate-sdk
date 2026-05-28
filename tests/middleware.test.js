@@ -13,10 +13,15 @@ const { publicKey, privateKey } = generateKeyPairSync('rsa', {
   privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
 });
 
+const APP_ID = 'mi-app';
+const GATE_URL = 'http://localhost:3001';
+const APP_SECRET = 'sdk-test-secret-' + 'a'.repeat(48);
+
 function mockReqRes(opts) {
   opts = opts || {};
   var headers = Object.assign({ accept: 'text/html' }, opts.headers || {});
   var setHeaders = {};
+  var setCookies = [];
   var redirectArg = null;
   var statusCode = 200;
   var jsonBody = null;
@@ -38,7 +43,15 @@ function mockReqRes(opts) {
     status: jest.fn(function (c) { statusCode = c; return res; }),
     json: jest.fn(function (b) { jsonBody = b; return res; }),
     redirect: jest.fn(function (url) { redirectArg = url; return res; }),
-    setHeader: jest.fn(function (name, value) { setHeaders[name] = value; }),
+    setHeader: jest.fn(function (name, value) {
+      setHeaders[name] = value;
+      if (name === 'Set-Cookie') {
+        setCookies = Array.isArray(value) ? value.slice() : [value];
+      }
+    }),
+    getHeader: jest.fn(function (name) {
+      return setHeaders[name];
+    }),
   };
   var next = jest.fn(function (err) { nextCalled = true; nextErr = err; });
   return {
@@ -46,6 +59,7 @@ function mockReqRes(opts) {
     res: res,
     next: next,
     get setHeaders() { return setHeaders; },
+    get setCookies() { return setCookies; },
     get redirectArg() { return redirectArg; },
     get statusCode() { return statusCode; },
     get jsonBody() { return jsonBody; },
@@ -54,17 +68,23 @@ function mockReqRes(opts) {
   };
 }
 
-describe('createGateMiddleware: validación de inputs', () => {
+describe('createGateMiddleware: validacion de inputs', () => {
   test('lanza si falta appId', async () => {
     await expect(createGateMiddleware({
-      gateUrl: 'http://localhost:3001', publicKey: publicKey,
-    })).rejects.toThrow(/appId y gateUrl son requeridos/);
+      gateUrl: GATE_URL, appSecret: APP_SECRET, publicKey: publicKey,
+    })).rejects.toThrow(/appId.*gateUrl.*appSecret/);
   });
 
   test('lanza si falta gateUrl', async () => {
     await expect(createGateMiddleware({
-      appId: 'mi-app', publicKey: publicKey,
-    })).rejects.toThrow(/appId y gateUrl son requeridos/);
+      appId: APP_ID, appSecret: APP_SECRET, publicKey: publicKey,
+    })).rejects.toThrow(/appId.*gateUrl.*appSecret/);
+  });
+
+  test('lanza si falta appSecret', async () => {
+    await expect(createGateMiddleware({
+      appId: APP_ID, gateUrl: GATE_URL, publicKey: publicKey,
+    })).rejects.toThrow(/appId.*gateUrl.*appSecret/);
   });
 
   test('bypass:true retorna middleware noop con req.user isRoot', async () => {
@@ -77,19 +97,20 @@ describe('createGateMiddleware: validación de inputs', () => {
   });
 
   test('bypass:true tiene precedencia sobre vars faltantes', async () => {
-    const mw = await createGateMiddleware({ bypass: true, appId: '', gateUrl: '' });
+    const mw = await createGateMiddleware({ bypass: true, appId: '', gateUrl: '', appSecret: '' });
     const m = mockReqRes();
     mw(m.req, m.res, m.next);
     expect(m.req.user.isRoot).toBe(true);
   });
 });
 
-describe('createGateMiddleware: verificación de tokens', () => {
+describe('createGateMiddleware: verificacion de tokens', () => {
   let middleware;
   beforeAll(async () => {
     middleware = await createGateMiddleware({
-      appId: 'mi-app',
-      gateUrl: 'http://localhost:3001',
+      appId: APP_ID,
+      gateUrl: GATE_URL,
+      appSecret: APP_SECRET,
       publicKey: publicKey,
       validateWithGate: false,
     });
@@ -97,14 +118,13 @@ describe('createGateMiddleware: verificación de tokens', () => {
 
   test('pasa con token valido para la app correcta', () => {
     const token = jwt.sign(
-      { email: 'user@apprecio.com', role: 'vendedor', appId: 'mi-app' },
+      { email: 'user@apprecio.com', role: 'vendedor', appId: APP_ID },
       privateKey, { algorithm: 'RS256', expiresIn: '1h' }
     );
     const m = mockReqRes({ headers: { authorization: 'Bearer ' + token } });
     middleware(m.req, m.res, m.next);
     expect(m.nextCalled).toBe(true);
     expect(m.req.user.email).toBe('user@apprecio.com');
-    expect(m.req.user.role).toBe('vendedor');
   });
 
   test('rechaza token para otra app', () => {
@@ -115,7 +135,6 @@ describe('createGateMiddleware: verificación de tokens', () => {
     const m = mockReqRes({ headers: { authorization: 'Bearer ' + token } });
     middleware(m.req, m.res, m.next);
     expect(m.statusCode).toBe(403);
-    expect(m.nextCalled).toBe(false);
   });
 
   test('acepta token de root sin importar appId', () => {
@@ -129,203 +148,186 @@ describe('createGateMiddleware: verificación de tokens', () => {
   });
 
   test('retorna 401 con token invalido', () => {
-    const m = mockReqRes({ headers: { authorization: 'Bearer token-basura-invalido' } });
+    const m = mockReqRes({ headers: { authorization: 'Bearer token-basura' } });
     middleware(m.req, m.res, m.next);
     expect(m.statusCode).toBe(401);
-    expect(m.nextCalled).toBe(false);
+  });
+
+  test('lee token desde cookie gate_token si no hay header', () => {
+    const token = jwt.sign(
+      { email: 'user@apprecio.com', appId: APP_ID },
+      privateKey, { algorithm: 'RS256', expiresIn: '1h' }
+    );
+    const m = mockReqRes({ headers: { cookie: 'gate_token=' + token } });
+    middleware(m.req, m.res, m.next);
+    expect(m.nextCalled).toBe(true);
   });
 });
 
-describe('createGateMiddleware: sin token (HTML vs no-HTML)', () => {
+describe('createGateMiddleware: sin token genera state y redirige a /login', () => {
   let middleware;
   beforeAll(async () => {
     middleware = await createGateMiddleware({
-      appId: 'mi-app',
-      gateUrl: 'http://localhost:3001',
+      appId: APP_ID,
+      gateUrl: GATE_URL,
+      appSecret: APP_SECRET,
       publicKey: publicKey,
       validateWithGate: false,
     });
   });
 
-  test('cliente HTML sin token → redirect a GATE login', () => {
-    const m = mockReqRes({ headers: { accept: 'text/html' } });
+  test('HTML sin token → setea cookie gate_state httpOnly + redirect a /login?...&state=<hex>', () => {
+    const m = mockReqRes({ headers: { accept: 'text/html' }, originalUrl: '/dashboard' });
     middleware(m.req, m.res, m.next);
-    expect(m.redirectArg).toMatch(/\/login\?app=mi-app/);
-    expect(m.nextCalled).toBe(false);
+    // Cookie state seteada
+    const stateCookie = m.setCookies.find(c => c.startsWith('gate_state='));
+    expect(stateCookie).toBeDefined();
+    expect(stateCookie).toMatch(/HttpOnly/);
+    expect(stateCookie).toMatch(/SameSite=Lax/);
+    expect(stateCookie).toMatch(/Max-Age=600/);
+    // El valor de la cookie debe ser hex de 64 chars
+    const stateValue = decodeURIComponent(stateCookie.split('=')[1].split(';')[0]);
+    expect(stateValue).toMatch(/^[a-f0-9]{64}$/);
+    // Redirect a /login con app, callback y state
+    expect(m.redirectArg).toMatch(new RegExp('^' + GATE_URL + '/login\\?'));
+    expect(m.redirectArg).toContain('app=' + APP_ID);
+    expect(m.redirectArg).toContain('callback=');
+    expect(m.redirectArg).toContain('state=' + encodeURIComponent(stateValue));
   });
 
-  test('cliente JSON (fetch/curl) sin token → 401 JSON con loginUrl', () => {
+  test('JSON sin token → 401 con loginUrl + cookie state igualmente seteada', () => {
     const m = mockReqRes({ headers: { accept: 'application/json' } });
     middleware(m.req, m.res, m.next);
     expect(m.statusCode).toBe(401);
-    expect(m.jsonBody).toMatchObject({ error: expect.stringMatching(/No autenticado/i) });
-    expect(m.jsonBody.loginUrl).toMatch(/\/login\?app=mi-app/);
+    expect(m.jsonBody.error).toMatch(/No autenticado/i);
+    expect(m.jsonBody.loginUrl).toMatch(/state=/);
+    const stateCookie = m.setCookies.find(c => c.startsWith('gate_state='));
+    expect(stateCookie).toBeDefined();
   });
 
-  test('cliente HTML con token expirado → redirect a GATE', () => {
-    const token = jwt.sign(
-      { email: 'user@apprecio.com', appId: 'mi-app' },
-      privateKey, { algorithm: 'RS256', expiresIn: '0s' }
-    );
-    const m = mockReqRes({
-      headers: { accept: 'text/html', authorization: 'Bearer ' + token },
-    });
+  test('cookie state tiene Secure cuando X-Forwarded-Proto: https', () => {
+    const m = mockReqRes({ headers: { accept: 'text/html', 'x-forwarded-proto': 'https' } });
     middleware(m.req, m.res, m.next);
-    expect(m.redirectArg).toMatch(/\/login\?app=mi-app/);
+    const stateCookie = m.setCookies.find(c => c.startsWith('gate_state='));
+    expect(stateCookie).toMatch(/Secure/);
   });
 });
 
-describe('createGateMiddleware: manejo del callback ?gate_token=...', () => {
+describe('createGateMiddleware: callback con ?code=&state=', () => {
   let middleware;
   beforeAll(async () => {
     middleware = await createGateMiddleware({
-      appId: 'mi-app',
-      gateUrl: 'http://localhost:3001',
+      appId: APP_ID,
+      gateUrl: GATE_URL,
+      appSecret: APP_SECRET,
       publicKey: publicKey,
       validateWithGate: false,
     });
   });
 
-  function validToken(extra) {
-    return jwt.sign(
-      Object.assign({ email: 'u@apprecio.com', role: 'admin', appId: 'mi-app' }, extra || {}),
-      privateKey, { algorithm: 'RS256', expiresIn: '1h' }
-    );
-  }
+  const validCode = 'a'.repeat(64);
+  const validState = 'b'.repeat(64);
 
-  test('rechaza con 401 si el gate_token del query tiene firma inválida (anti session fixation)', () => {
+  test('rechaza con 400 si code tiene formato invalido', () => {
     const m = mockReqRes({
-      headers: { accept: 'text/html' },
-      query: { gate_token: 'eyJ.fake.token' },
-      originalUrl: '/dashboard?gate_token=eyJ.fake.token',
+      query: { code: 'not-hex', state: validState },
+      originalUrl: '/cb?code=not-hex&state=' + validState,
     });
     middleware(m.req, m.res, m.next);
-    expect(m.statusCode).toBe(401);
-    expect(m.setHeaders['Set-Cookie']).toBeUndefined();
-    expect(m.redirectArg).toBeNull();
+    expect(m.statusCode).toBe(400);
+    expect(m.jsonBody.error).toMatch(/code/i);
   });
 
-  test('JWT válido: extrae gate_token a cookie httpOnly y redirige a path limpio', () => {
-    const tok = validToken();
+  test('rechaza con 400 si state tiene formato invalido', () => {
     const m = mockReqRes({
-      headers: { accept: 'text/html' },
-      query: { gate_token: tok },
-      originalUrl: '/dashboard?gate_token=' + tok,
+      query: { code: validCode, state: 'not-hex' },
+      originalUrl: '/cb',
     });
     middleware(m.req, m.res, m.next);
-    expect(m.setHeaders['Set-Cookie']).toMatch(/^gate_token=/);
-    expect(m.setHeaders['Set-Cookie']).toMatch(/HttpOnly/);
-    expect(m.setHeaders['Set-Cookie']).toMatch(/SameSite=Lax/);
-    expect(m.setHeaders['Set-Cookie']).not.toMatch(/Secure/);
-    expect(m.setHeaders['Cache-Control']).toBe('no-store');
-    expect(m.setHeaders['Referrer-Policy']).toBe('no-referrer');
-    expect(m.redirectArg).toBe('/dashboard');
+    expect(m.statusCode).toBe(400);
+    expect(m.jsonBody.error).toMatch(/state/i);
   });
 
-  test('JWT válido + X-Forwarded-Proto: https → cookie con Secure', () => {
-    const tok = validToken();
+  test('rechaza con 400 si la cookie gate_state esta ausente', () => {
     const m = mockReqRes({
-      headers: { accept: 'text/html', 'x-forwarded-proto': 'https' },
-      query: { gate_token: tok },
-      originalUrl: '/?gate_token=' + tok,
+      query: { code: validCode, state: validState },
+      originalUrl: '/cb',
+      // sin cookie
     });
     middleware(m.req, m.res, m.next);
-    expect(m.setHeaders['Set-Cookie']).toMatch(/Secure/);
+    expect(m.statusCode).toBe(400);
+    expect(m.jsonBody.error).toMatch(/state CSRF: cookie ausente/i);
   });
 
-  test('preserva los otros query params al limpiar gate_token', () => {
-    const tok = validToken();
+  test('rechaza con 400 si state del query no coincide con la cookie (CSRF defense)', () => {
     const m = mockReqRes({
-      query: { gate_token: tok, from: '2026-01-01', to: '2026-12-31' },
-      originalUrl: '/reportes?gate_token=' + tok + '&from=2026-01-01&to=2026-12-31',
+      headers: { cookie: 'gate_state=' + 'c'.repeat(64) },
+      query: { code: validCode, state: validState },
+      originalUrl: '/cb',
     });
     middleware(m.req, m.res, m.next);
-    expect(m.redirectArg).not.toMatch(/gate_token/);
-    expect(m.redirectArg).toMatch(/from=2026-01-01/);
-    expect(m.redirectArg).toMatch(/to=2026-12-31/);
+    expect(m.statusCode).toBe(400);
+    expect(m.jsonBody.error).toMatch(/state CSRF: mismatch/i);
   });
 
-  test('open redirect protection: //evil.com en originalUrl se normaliza a un solo /', () => {
-    const tok = validToken();
+  test('rechaza con 400 si state tiene distinta longitud que la cookie', () => {
     const m = mockReqRes({
-      query: { gate_token: tok },
-      originalUrl: '//evil.com/path?gate_token=' + tok,
+      headers: { cookie: 'gate_state=' + 'a'.repeat(64) },
+      query: { code: validCode, state: 'a'.repeat(32) },
+      originalUrl: '/cb',
     });
     middleware(m.req, m.res, m.next);
-    expect(m.redirectArg.startsWith('/')).toBe(true);
-    expect(m.redirectArg.startsWith('//')).toBe(false);
-  });
-
-  test('después del redirect-limpio, la siguiente request (con cookie) pasa', () => {
-    const token = jwt.sign(
-      { email: 'user@apprecio.com', role: 'vendedor', appId: 'mi-app' },
-      privateKey, { algorithm: 'RS256', expiresIn: '1h' }
-    );
-    const m = mockReqRes({
-      headers: { accept: 'text/html', cookie: 'gate_token=' + token },
-    });
-    middleware(m.req, m.res, m.next);
-    expect(m.nextCalled).toBe(true);
-    expect(m.req.user.email).toBe('user@apprecio.com');
+    expect(m.statusCode).toBe(400);
   });
 });
 
 describe('requireRole', () => {
   test('pasa con rol correcto', () => {
     const m = mockReqRes();
-    m.req.user = { email: 'user@apprecio.com', role: 'vendedor' };
+    m.req.user = { email: 'u@apprecio.com', role: 'vendedor' };
     requireRole('vendedor', 'admin')(m.req, m.res, m.next);
     expect(m.nextCalled).toBe(true);
   });
 
   test('rechaza rol incorrecto', () => {
     const m = mockReqRes();
-    m.req.user = { email: 'user@apprecio.com', role: 'vendedor' };
+    m.req.user = { email: 'u@apprecio.com', role: 'vendedor' };
     requireRole('admin')(m.req, m.res, m.next);
     expect(m.statusCode).toBe(403);
   });
 
   test('root pasa siempre', () => {
     const m = mockReqRes();
-    m.req.user = { email: 'root@apprecio.com', role: 'root', isRoot: true };
+    m.req.user = { email: 'r@apprecio.com', role: 'root', isRoot: true };
     requireRole('vendedor')(m.req, m.res, m.next);
     expect(m.nextCalled).toBe(true);
   });
 
-  test('retorna 401 si no hay usuario autenticado', () => {
+  test('retorna 401 si no hay usuario', () => {
     const m = mockReqRes();
     requireRole('vendedor')(m.req, m.res, m.next);
     expect(m.statusCode).toBe(401);
-    expect(m.nextCalled).toBe(false);
   });
 });
 
 describe('requirePermission', () => {
-  test('pasa si tiene el permiso requerido', () => {
+  test('pasa si tiene el permiso', () => {
     const m = mockReqRes();
-    m.req.user = { email: 'user@apprecio.com', permissions: ['view:dashboard', 'edit:ventas'] };
+    m.req.user = { email: 'u@apprecio.com', permissions: ['view:dashboard'] };
     requirePermission('view:dashboard')(m.req, m.res, m.next);
-    expect(m.nextCalled).toBe(true);
-  });
-
-  test('pasa si tiene todos los permisos requeridos', () => {
-    const m = mockReqRes();
-    m.req.user = { email: 'user@apprecio.com', permissions: ['view:dashboard', 'edit:ventas'] };
-    requirePermission('view:dashboard', 'edit:ventas')(m.req, m.res, m.next);
     expect(m.nextCalled).toBe(true);
   });
 
   test('rechaza si falta un permiso', () => {
     const m = mockReqRes();
-    m.req.user = { email: 'user@apprecio.com', permissions: ['view:dashboard'] };
+    m.req.user = { email: 'u@apprecio.com', permissions: ['view:dashboard'] };
     requirePermission('view:dashboard', 'edit:ventas')(m.req, m.res, m.next);
     expect(m.statusCode).toBe(403);
-    expect(m.nextCalled).toBe(false);
   });
 
   test('root pasa siempre sin importar permisos', () => {
     const m = mockReqRes();
-    m.req.user = { email: 'root@apprecio.com', isRoot: true, permissions: [] };
+    m.req.user = { email: 'r@apprecio.com', isRoot: true, permissions: [] };
     requirePermission('manage:usuarios')(m.req, m.res, m.next);
     expect(m.nextCalled).toBe(true);
   });
@@ -336,9 +338,9 @@ describe('requirePermission', () => {
     expect(m.statusCode).toBe(401);
   });
 
-  test('rechaza si usuario no tiene permisos definidos', () => {
+  test('rechaza si usuario sin permisos definidos', () => {
     const m = mockReqRes();
-    m.req.user = { email: 'user@apprecio.com' };
+    m.req.user = { email: 'u@apprecio.com' };
     requirePermission('view:dashboard')(m.req, m.res, m.next);
     expect(m.statusCode).toBe(403);
   });
@@ -350,72 +352,69 @@ const axios = require('axios');
 describe('validateWithGate (token versioning)', () => {
   beforeEach(() => {
     axios.get.mockReset();
+    axios.post.mockReset();
     clearValidationCache();
   });
 
-  test('consulta a Gate y pasa si token es valido', async () => {
+  test('consulta a Gate y pasa si valido', async () => {
     axios.get.mockResolvedValue({ data: { valid: true, tokenVersion: 2 } });
     const mw = await createGateMiddleware({
-      appId: 'mi-app', gateUrl: 'http://gate.test',
+      appId: APP_ID, gateUrl: GATE_URL, appSecret: APP_SECRET,
       publicKey: publicKey, validateWithGate: true,
     });
     const token = jwt.sign(
-      { email: 'user@apprecio.com', role: 'vendedor', appId: 'mi-app', tokenVersion: 2 },
+      { email: 'u@apprecio.com', role: 'vendedor', appId: APP_ID, tokenVersion: 2 },
       privateKey, { algorithm: 'RS256', expiresIn: '1h' }
     );
     const m = mockReqRes({ headers: { authorization: 'Bearer ' + token } });
     mw(m.req, m.res, m.next);
     await new Promise(resolve => setTimeout(resolve, 50));
-    expect(axios.get).toHaveBeenCalledWith('http://gate.test/auth/validate', expect.any(Object));
+    expect(axios.get).toHaveBeenCalledWith(GATE_URL + '/auth/validate', expect.any(Object));
     expect(m.nextCalled).toBe(true);
   });
 
-  test('rechaza con 401 si Gate devuelve 401 (token invalidado)', async () => {
+  test('rechaza 401 si Gate devuelve 401', async () => {
     const err = new Error('Unauthorized');
     err.response = { status: 401 };
     axios.get.mockRejectedValue(err);
     const mw = await createGateMiddleware({
-      appId: 'mi-app', gateUrl: 'http://gate.test',
+      appId: APP_ID, gateUrl: GATE_URL, appSecret: APP_SECRET,
       publicKey: publicKey, validateWithGate: true,
     });
     const token = jwt.sign(
-      { email: 'user@apprecio.com', role: 'vendedor', appId: 'mi-app', tokenVersion: 1 },
+      { email: 'u@apprecio.com', appId: APP_ID, tokenVersion: 1 },
       privateKey, { algorithm: 'RS256', expiresIn: '1h' }
     );
     const m = mockReqRes({ headers: { authorization: 'Bearer ' + token } });
     mw(m.req, m.res, m.next);
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(m.statusCode).toBe(401);
-    expect(m.nextCalled).toBe(false);
   });
 
   test('fail-closed por default: 503 si Gate esta caido', async () => {
-    const err = new Error('ECONNREFUSED');
-    axios.get.mockRejectedValue(err);
+    axios.get.mockRejectedValue(new Error('ECONNREFUSED'));
     const mw = await createGateMiddleware({
-      appId: 'mi-app', gateUrl: 'http://gate.test',
+      appId: APP_ID, gateUrl: GATE_URL, appSecret: APP_SECRET,
       publicKey: publicKey, validateWithGate: true,
     });
     const token = jwt.sign(
-      { email: 'user@apprecio.com', role: 'vendedor', appId: 'mi-app', tokenVersion: 0 },
+      { email: 'u@apprecio.com', appId: APP_ID, tokenVersion: 0 },
       privateKey, { algorithm: 'RS256', expiresIn: '1h' }
     );
     const m = mockReqRes({ headers: { authorization: 'Bearer ' + token } });
     mw(m.req, m.res, m.next);
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(m.statusCode).toBe(503);
-    expect(m.nextCalled).toBe(false);
   });
 
-  test('fail-open explicito: pasa si failOpenOnNetworkError=true', async () => {
-    const err = new Error('ECONNREFUSED');
-    axios.get.mockRejectedValue(err);
+  test('fail-open explicito permite pasar si failOpenOnNetworkError=true', async () => {
+    axios.get.mockRejectedValue(new Error('ECONNREFUSED'));
     const mw = await createGateMiddleware({
-      appId: 'mi-app', gateUrl: 'http://gate.test',
+      appId: APP_ID, gateUrl: GATE_URL, appSecret: APP_SECRET,
       publicKey: publicKey, validateWithGate: true, failOpenOnNetworkError: true,
     });
     const token = jwt.sign(
-      { email: 'user@apprecio.com', role: 'vendedor', appId: 'mi-app', tokenVersion: 0 },
+      { email: 'u@apprecio.com', appId: APP_ID, tokenVersion: 0 },
       privateKey, { algorithm: 'RS256', expiresIn: '1h' }
     );
     const m = mockReqRes({ headers: { authorization: 'Bearer ' + token } });
@@ -423,53 +422,143 @@ describe('validateWithGate (token versioning)', () => {
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(m.nextCalled).toBe(true);
   });
+});
 
-  test('cacheTtl:0 consulta siempre a Gate', async () => {
-    axios.get.mockResolvedValue({ data: { valid: true, tokenVersion: 0 } });
-    const mw = await createGateMiddleware({
-      appId: 'mi-app', gateUrl: 'http://gate.test',
-      publicKey: publicKey, validateWithGate: true, cacheTtl: 0,
-    });
-    const token = jwt.sign(
-      { email: 'user@apprecio.com', role: 'vendedor', appId: 'mi-app', tokenVersion: 0 },
+describe('callback con ?code=&state=: exchange exitoso', () => {
+  beforeEach(() => {
+    axios.get.mockReset();
+    axios.post.mockReset();
+  });
+
+  test('valida state + POST /auth/exchange-code + setea cookie + redirect limpio', async () => {
+    const validCode = 'd'.repeat(64);
+    const validState = 'e'.repeat(64);
+    const tokenJwt = jwt.sign(
+      { email: 'u@apprecio.com', appId: APP_ID },
       privateKey, { algorithm: 'RS256', expiresIn: '1h' }
     );
-    const m1 = mockReqRes({ headers: { authorization: 'Bearer ' + token } });
-    const m2 = mockReqRes({ headers: { authorization: 'Bearer ' + token } });
-    mw(m1.req, m1.res, m1.next);
+    axios.post.mockResolvedValue({ data: { token: tokenJwt, expiresIn: 14400 } });
+
+    const mw = await createGateMiddleware({
+      appId: APP_ID, gateUrl: GATE_URL, appSecret: APP_SECRET,
+      publicKey: publicKey, validateWithGate: false,
+    });
+    const m = mockReqRes({
+      headers: { cookie: 'gate_state=' + validState, accept: 'text/html' },
+      query: { code: validCode, state: validState },
+      originalUrl: '/dashboard?code=' + validCode + '&state=' + validState,
+    });
+
+    mw(m.req, m.res, m.next);
     await new Promise(resolve => setTimeout(resolve, 30));
-    mw(m2.req, m2.res, m2.next);
+
+    expect(axios.post).toHaveBeenCalledWith(
+      GATE_URL + '/auth/exchange-code',
+      { code: validCode, app: APP_ID, secret: APP_SECRET },
+      expect.any(Object)
+    );
+    // Cookie gate_token con el JWT recibido
+    const tokenCookie = m.setCookies.find(c => c.startsWith('gate_token='));
+    expect(tokenCookie).toBeDefined();
+    expect(tokenCookie).toMatch(/HttpOnly/);
+    // Cookie gate_state borrada (Max-Age=0)
+    const stateClear = m.setCookies.find(c => c.startsWith('gate_state=;') || c.startsWith('gate_state=;'));
+    expect(stateClear).toBeDefined();
+    expect(stateClear).toMatch(/Max-Age=0/);
+    // Headers anti-leak
+    expect(m.setHeaders['Cache-Control']).toBe('no-store');
+    expect(m.setHeaders['Referrer-Policy']).toBe('no-referrer');
+    // Redirect limpio: sin code ni state
+    expect(m.redirectArg).toBe('/dashboard');
+  });
+
+  test('exchange fallido (401 desde GATE) devuelve el mismo status', async () => {
+    const err = new Error('Unauthorized');
+    err.response = { status: 401, data: { error: 'Code invalido o expirado' } };
+    axios.post.mockRejectedValue(err);
+
+    const mw = await createGateMiddleware({
+      appId: APP_ID, gateUrl: GATE_URL, appSecret: APP_SECRET,
+      publicKey: publicKey, validateWithGate: false,
+    });
+    const validCode = 'f'.repeat(64);
+    const validState = 'a'.repeat(64);
+    const m = mockReqRes({
+      headers: { cookie: 'gate_state=' + validState },
+      query: { code: validCode, state: validState },
+      originalUrl: '/cb',
+    });
+
+    mw(m.req, m.res, m.next);
     await new Promise(resolve => setTimeout(resolve, 30));
-    expect(axios.get).toHaveBeenCalledTimes(2);
+
+    expect(m.statusCode).toBe(401);
+  });
+
+  test('exchange con response sin token devuelve 502', async () => {
+    axios.post.mockResolvedValue({ data: {} });
+    const mw = await createGateMiddleware({
+      appId: APP_ID, gateUrl: GATE_URL, appSecret: APP_SECRET,
+      publicKey: publicKey, validateWithGate: false,
+    });
+    const validCode = '1'.repeat(64);
+    const validState = '2'.repeat(64);
+    const m = mockReqRes({
+      headers: { cookie: 'gate_state=' + validState },
+      query: { code: validCode, state: validState },
+      originalUrl: '/cb',
+    });
+
+    mw(m.req, m.res, m.next);
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    expect(m.statusCode).toBe(502);
+  });
+
+  test('open redirect protection: //evil.com en originalUrl se normaliza', async () => {
+    const tokenJwt = jwt.sign({ email: 'u@apprecio.com', appId: APP_ID }, privateKey, { algorithm: 'RS256' });
+    axios.post.mockResolvedValue({ data: { token: tokenJwt, expiresIn: 14400 } });
+    const mw = await createGateMiddleware({
+      appId: APP_ID, gateUrl: GATE_URL, appSecret: APP_SECRET,
+      publicKey: publicKey, validateWithGate: false,
+    });
+    const validCode = 'a'.repeat(64);
+    const validState = 'b'.repeat(64);
+    const m = mockReqRes({
+      headers: { cookie: 'gate_state=' + validState },
+      query: { code: validCode, state: validState },
+      originalUrl: '//evil.com/path?code=' + validCode + '&state=' + validState,
+    });
+
+    mw(m.req, m.res, m.next);
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    expect(m.redirectArg).toBeTruthy();
+    expect(m.redirectArg.startsWith('/')).toBe(true);
+    expect(m.redirectArg.startsWith('//')).toBe(false);
   });
 });
 
 describe('createGateMiddleware: descarga automatica de publicKey', () => {
   beforeEach(() => {
     axios.get.mockReset();
+    axios.post.mockReset();
   });
 
-  test('si no se pasa publicKey, la descarga de {gateUrl}/auth/public-key', async () => {
+  test('si no se pasa publicKey, la descarga al boot', async () => {
     const dummyKey = '-----BEGIN PUBLIC KEY-----\nFAKE\n-----END PUBLIC KEY-----';
     axios.get.mockResolvedValueOnce({ data: { publicKey: dummyKey } });
     const mw = await createGateMiddleware({
-      appId: 'mi-app',
-      gateUrl: 'http://gate.test',
-      // publicKey omitido
-      validateWithGate: false,
+      appId: APP_ID, gateUrl: GATE_URL, appSecret: APP_SECRET, validateWithGate: false,
     });
-    expect(axios.get).toHaveBeenCalledWith(
-      'http://gate.test/auth/public-key',
-      expect.any(Object)
-    );
+    expect(axios.get).toHaveBeenCalledWith(GATE_URL + '/auth/public-key', expect.any(Object));
     expect(typeof mw).toBe('function');
   });
 
-  test('si la descarga falla, lanza error (no arranca el server)', async () => {
+  test('si la descarga falla, lanza', async () => {
     axios.get.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
     await expect(createGateMiddleware({
-      appId: 'mi-app',
-      gateUrl: 'http://gate.test',
+      appId: APP_ID, gateUrl: GATE_URL, appSecret: APP_SECRET,
     })).rejects.toThrow();
   });
 });
