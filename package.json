@@ -1,6 +1,6 @@
 {
   "name": "gate-sdk",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "SDK para integrar Gate auth en aplicaciones Express",
   "main": "index.js",
   "scripts": {
