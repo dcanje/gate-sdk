@@ -11,7 +11,7 @@ Gate maneja la autenticación (Google OAuth) y autorización (RBAC con permisos 
 npm install git+https://github.com/dcanje/gate-sdk.git
 
 # Fijar una versión específica (recomendado para reproducibilidad)
-npm install gate-sdk@github:dcanje/gate-sdk#v3.0.0
+npm install gate-sdk@github:dcanje/gate-sdk#v3.0.1
 ```
 
 ## Uso rápido
@@ -104,7 +104,10 @@ const gate = await createGateMiddleware({ bypass: true });
 6. SDK detecta ?code= y ?state=:
    - lee cookie gate_state
    - compara con req.query.state usando crypto.timingSafeEqual
-   - si no coincide → 400 "state CSRF"
+   - si no coincide (mismatch / cookie ausente):
+       · navegación browser → borra la cookie state y redirige a la URL
+         base limpia para rearmar el login (recuperación, ver más abajo)
+       · petición no-HTML → 400 "state CSRF: ..."
         │
         ▼
 7. SDK hace POST server-to-server:
@@ -200,6 +203,19 @@ Cuando llega una request sin token:
 - **Cualquier otro `Accept`** (fetch, curl, llamadas de SPA): el SDK responde **401 JSON** con `{ error: 'No autenticado', loginUrl: '...' }`. Tu cliente puede leer `loginUrl` y redirigir manualmente cuando le venga bien.
 
 En ambos casos la cookie `gate_state` queda seteada para que un siguiente navigate del browser pueda completar el flow.
+
+## Recuperación de callbacks obsoletos (desde v3.0.1)
+
+Un callback `?code=&state=` puede llegar **obsoleto**: la cookie `gate_state` ya no existe (caducó a los 10 min) o quedó pisada por un state más nuevo. El caso típico real es una pestaña abierta con polling: cuando el token expira, cada request regenera la cookie `gate_state`, así que al completar un re-login el `state` del callback ya no calza con la cookie → `state CSRF: mismatch`.
+
+Antes esto terminaba en un **JSON 400 sin salida**. Desde v3.0.1, ante `mismatch` o `cookie ausente`:
+
+- **`Accept: text/html`** (navegación de browser): el SDK **borra la cookie `gate_state` stale y redirige 302 a la URL base limpia** (sin `code`/`state`). El siguiente request, ya sin token, arranca un login fresco. El usuario se recupera solo, sin ver el error.
+- **Cualquier otro `Accept`** (API/SPA): se mantiene el **400 JSON** con `state CSRF: ...` (contrato intacto).
+
+Es seguro: el `code` nunca se canjea cuando el state no calza, así que no hay session fixation; solo le damos al usuario legítimo un camino de vuelta. El path del redirect se normaliza igual que en el flujo exitoso (anti open-redirect).
+
+**Recomendación para apps con polling/long-running:** maneja el `401` en tus llamadas `fetch` —detén el polling y redirige a `loginUrl`— para que una pestaña vieja no quede regenerando la cookie `gate_state` indefinidamente.
 
 ## Variables de entorno
 

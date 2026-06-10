@@ -248,20 +248,51 @@ describe('createGateMiddleware: callback con ?code=&state=', () => {
     expect(m.jsonBody.error).toMatch(/state/i);
   });
 
-  test('rechaza con 400 si la cookie gate_state esta ausente', () => {
+  // --- Cookie state ausente ---
+  // Caso tipico: el callback quedo obsoleto (la cookie state caduco o fue
+  // pisada por otra pestaña). En navegacion de browser recuperamos el login
+  // limpio en vez de mostrar un JSON sin salida (Nivel B). Para API/SPA
+  // mantenemos el 400 JSON (contrato intacto).
+
+  test('navegacion browser con cookie state ausente → redirige a URL base limpia y borra cookie state', () => {
     const m = mockReqRes({
+      headers: { accept: 'text/html' },
+      query: { code: validCode, state: validState },
+      originalUrl: '/dashboard?code=' + validCode + '&state=' + validState,
+    });
+    middleware(m.req, m.res, m.next);
+    expect(m.redirectArg).toBe('/dashboard');
+    const stateClear = m.setCookies.find(c => c.startsWith('gate_state=;'));
+    expect(stateClear).toBeDefined();
+    expect(stateClear).toMatch(/Max-Age=0/);
+  });
+
+  test('peticion no-HTML con cookie state ausente → 400 JSON', () => {
+    const m = mockReqRes({
+      headers: { accept: 'application/json' },
       query: { code: validCode, state: validState },
       originalUrl: '/cb',
-      // sin cookie
     });
     middleware(m.req, m.res, m.next);
     expect(m.statusCode).toBe(400);
     expect(m.jsonBody.error).toMatch(/state CSRF: cookie ausente/i);
   });
 
-  test('rechaza con 400 si state del query no coincide con la cookie (CSRF defense)', () => {
+  // --- State mismatch (CSRF / callback superado) ---
+
+  test('navegacion browser con state mismatch → redirige a URL base limpia (Nivel B)', () => {
     const m = mockReqRes({
-      headers: { cookie: 'gate_state=' + 'c'.repeat(64) },
+      headers: { cookie: 'gate_state=' + 'c'.repeat(64), accept: 'text/html' },
+      query: { code: validCode, state: validState },
+      originalUrl: '/panel?code=' + validCode + '&state=' + validState,
+    });
+    middleware(m.req, m.res, m.next);
+    expect(m.redirectArg).toBe('/panel');
+  });
+
+  test('peticion no-HTML con state mismatch → 400 JSON (CSRF defense)', () => {
+    const m = mockReqRes({
+      headers: { cookie: 'gate_state=' + 'c'.repeat(64), accept: 'application/json' },
       query: { code: validCode, state: validState },
       originalUrl: '/cb',
     });
@@ -270,14 +301,25 @@ describe('createGateMiddleware: callback con ?code=&state=', () => {
     expect(m.jsonBody.error).toMatch(/state CSRF: mismatch/i);
   });
 
-  test('rechaza con 400 si state tiene distinta longitud que la cookie', () => {
+  test('state de distinta longitud que la cookie se trata como mismatch (no-HTML → 400)', () => {
     const m = mockReqRes({
-      headers: { cookie: 'gate_state=' + 'a'.repeat(64) },
+      headers: { cookie: 'gate_state=' + 'a'.repeat(64), accept: 'application/json' },
       query: { code: validCode, state: 'a'.repeat(32) },
       originalUrl: '/cb',
     });
     middleware(m.req, m.res, m.next);
     expect(m.statusCode).toBe(400);
+  });
+
+  test('recuperacion Nivel B normaliza open-redirect (//evil.com → /evil.com)', () => {
+    const m = mockReqRes({
+      headers: { cookie: 'gate_state=' + 'c'.repeat(64), accept: 'text/html' },
+      query: { code: validCode, state: validState },
+      originalUrl: '//evil.com/path?code=' + validCode + '&state=' + validState,
+    });
+    middleware(m.req, m.res, m.next);
+    expect(m.redirectArg.startsWith('/')).toBe(true);
+    expect(m.redirectArg.startsWith('//')).toBe(false);
   });
 });
 

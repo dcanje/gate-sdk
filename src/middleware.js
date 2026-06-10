@@ -198,12 +198,12 @@ function manejarCallbackCode(req, res, _next, opts) {
   // para el atacante (este pasa el codigo a la victima).
   var cookieState = leerCookie(req, 'gate_state');
   if (!cookieState) {
-    return res.status(400).json({ error: 'state CSRF: cookie ausente' });
+    return recuperarCallbackObsoleto(req, res, 'state CSRF: cookie ausente');
   }
   var a = Buffer.from(state);
   var b = Buffer.from(cookieState);
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(400).json({ error: 'state CSRF: mismatch' });
+    return recuperarCallbackObsoleto(req, res, 'state CSRF: mismatch');
   }
 
   // Intercambiar code por JWT server-to-server. El secret NUNCA viaja por el
@@ -227,14 +227,7 @@ function manejarCallbackCode(req, res, _next, opts) {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Referrer-Policy', 'no-referrer');
 
-    var cleanQuery = Object.assign({}, req.query);
-    delete cleanQuery.code;
-    delete cleanQuery.state;
-    var qs = new URLSearchParams(cleanQuery).toString();
-    var basePathRaw = (req.originalUrl || req.url || '/').split('?')[0];
-    var pathSeguro = '/' + basePathRaw.replace(/^[\/\\]+/, '');
-    var cleanUrl = pathSeguro + (qs ? '?' + qs : '');
-    return res.redirect(cleanUrl);
+    return res.redirect(urlBaseLimpia(req));
   }).catch(function (err) {
     var status = (err.response && err.response.status) || 502;
     var message = (err.response && err.response.data && err.response.data.error)
@@ -330,6 +323,33 @@ function esConexionSegura(req) {
 
 function aceptaHtml(req) {
   return ((req.headers && req.headers.accept) || '').indexOf('text/html') !== -1;
+}
+
+// URL base del request sin los parametros code/state del callback OAuth.
+// Normaliza el path para evitar open-redirect (// -> /). La usan tanto el
+// callback exitoso como la recuperacion de callbacks obsoletos.
+function urlBaseLimpia(req) {
+  var cleanQuery = Object.assign({}, req.query);
+  delete cleanQuery.code;
+  delete cleanQuery.state;
+  var qs = new URLSearchParams(cleanQuery).toString();
+  var basePathRaw = (req.originalUrl || req.url || '/').split('?')[0];
+  var pathSeguro = '/' + basePathRaw.replace(/^[\/\\]+/, '');
+  return pathSeguro + (qs ? '?' + qs : '');
+}
+
+// Callback OAuth obsoleto: el state no calza con la cookie (mismatch) o la
+// cookie ya no esta (caducada o pisada por otra pestaña/poll). En navegacion
+// de browser, en vez de un JSON 400 sin salida, borramos la cookie state stale
+// y redirigimos a la URL base limpia: el proximo request sin code/state arranca
+// un login fresco. Es seguro: al no canjear el code no hay session fixation.
+// Para peticiones no-HTML (API/SPA) mantenemos el 400 JSON (contrato intacto).
+function recuperarCallbackObsoleto(req, res, errorMsg) {
+  if (aceptaHtml(req)) {
+    borrarCookieState(res, esConexionSegura(req));
+    return res.redirect(urlBaseLimpia(req));
+  }
+  return res.status(400).json({ error: errorMsg });
 }
 
 module.exports = {
