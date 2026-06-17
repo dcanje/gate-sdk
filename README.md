@@ -94,7 +94,7 @@ const gate = await createGateMiddleware({ bypass: true });
 3. Gate muestra login Google. User autentica.
         │
         ▼
-4. Gate emite code single-use de 60s (db.authCodes en Mongo)
+4. Gate emite code single-use de 60s
         │
         ▼
 5. Gate redirige al callback:
