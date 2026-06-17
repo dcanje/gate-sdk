@@ -5,11 +5,22 @@ const axios = require('axios');
 // Cache de validacion: email:tokenVersion -> { timestamp, valid }
 var validationCache = new Map();
 var DEFAULT_CACHE_TTL = 60 * 1000;          // 60 segundos
+var CACHE_EVICT_INTERVAL_MS = 5 * 60 * 1000; // eviccion cada 5 minutos
 var PUBLIC_KEY_TIMEOUT_MS = 5000;
 var STATE_TTL_SECONDS = 600;                // 10 minutos para completar el login
 var EXCHANGE_TIMEOUT_MS = 5000;
 var CODE_FORMAT = /^[a-f0-9]{64}$/;
 var STATE_FORMAT = /^[a-f0-9]{64}$/;
+
+// Eviccion periodica de entradas expiradas para evitar que el Map crezca sin limite.
+setInterval(function evictarCacheExpirado() {
+  var ahora = Date.now();
+  validationCache.forEach(function (entry, key) {
+    if (ahora - entry.timestamp >= DEFAULT_CACHE_TTL * 2) {
+      validationCache.delete(key);
+    }
+  });
+}, CACHE_EVICT_INTERVAL_MS).unref();
 
 async function descargarPublicKey(gateUrl) {
   var url = gateUrl.replace(/\/+$/, '') + '/auth/public-key';
@@ -128,8 +139,9 @@ async function createGateMiddleware(options) {
       return res.status(401).json({ error: 'Token invalido' });
     }
 
-    // 4. Verificar que el token es para esta app (root pasa siempre)
-    if (!decoded.isRoot && decoded.appId && decoded.appId !== appId) {
+    // 4. Verificar que el token es para esta app (root pasa siempre).
+    //    Un JWT sin appId (ej. sesion del panel admin) no es valido para apps consumidoras.
+    if (!decoded.isRoot && decoded.appId !== appId) {
       return res.status(403).json({ error: 'Token no valido para esta aplicacion' });
     }
 
@@ -273,7 +285,11 @@ function leerCookie(req, nombre) {
     if (idxIgual < 0) continue;
     var k = c.substring(0, idxIgual).trim();
     if (k === nombre) {
-      return decodeURIComponent(c.substring(idxIgual + 1).trim());
+      try {
+        return decodeURIComponent(c.substring(idxIgual + 1).trim());
+      } catch (_) {
+        return null;
+      }
     }
   }
   return null;
@@ -322,7 +338,10 @@ function esConexionSegura(req) {
 }
 
 function aceptaHtml(req) {
-  return ((req.headers && req.headers.accept) || '').indexOf('text/html') !== -1;
+  var accept = (req.headers && req.headers.accept) || '';
+  return accept.split(',').some(function (part) {
+    return part.trim().split(';')[0].trim() === 'text/html';
+  });
 }
 
 // URL base del request sin los parametros code/state del callback OAuth.

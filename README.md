@@ -268,7 +268,7 @@ v3 es **breaking change** (sumamos `appSecret` requerido + flow cambió de token
 
 **Pasos para migrar:**
 
-1. Conseguir el `secret` de tu app: lo devuelve `db.apps.findOne({_id: 'mi-app'}, {secret:1})` en el Mongo de Gate, o lo creó el panel admin al registrar la app.
+1. Conseguir el `secret` de tu app desde el panel admin de Gate (pestaña Configuración de la app).
 2. Agregar `GATE_APP_SECRET=<el-secret>` al `.env` de tu app.
 3. Bumpear la versión del SDK: `"gate-sdk": "github:dcanje/gate-sdk#v3.0.0"`. Correr `npm install`.
 4. Pasar `appSecret` al `createGateMiddleware`.

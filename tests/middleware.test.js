@@ -162,6 +162,27 @@ describe('createGateMiddleware: verificacion de tokens', () => {
     middleware(m.req, m.res, m.next);
     expect(m.nextCalled).toBe(true);
   });
+
+  test('cookie con percent-encoding malformado no crashea (DoS fix)', () => {
+    const m = mockReqRes({ headers: { cookie: 'gate_token=%ZZ' } });
+    middleware(m.req, m.res, m.next);
+    // Debe redirigir al login o dar 401, nunca lanzar excepcion
+    expect(m.nextCalled).toBe(false);
+    const respondio = m.redirectArg !== null || m.statusCode !== 200;
+    expect(respondio).toBe(true);
+  });
+
+  test('JWT de panel admin (sin appId) es rechazado en app consumidora', () => {
+    // El panel admin emite JWTs sin appId; no deben ser validos en apps consumidoras
+    const adminPanelToken = jwt.sign(
+      { email: 'admin@apprecio.com', name: 'Admin', isRoot: false, tokenVersion: 1 },
+      privateKey, { algorithm: 'RS256', expiresIn: '1h' }
+    );
+    const m = mockReqRes({ headers: { authorization: 'Bearer ' + adminPanelToken } });
+    middleware(m.req, m.res, m.next);
+    expect(m.statusCode).toBe(403);
+    expect(m.nextCalled).toBe(false);
+  });
 });
 
 describe('createGateMiddleware: sin token genera state y redirige a /login', () => {
