@@ -22,7 +22,7 @@ describe('GateClient', () => {
     const key = await client.fetchPublicKey();
 
     expect(key).toBe(fakePem);
-    expect(axios.get).toHaveBeenCalledWith('http://localhost:3001/auth/public-key');
+    expect(axios.get).toHaveBeenCalledWith('http://localhost:3001/auth/public-key', { timeout: 5000 });
     expect(client.publicKey).toBe(fakePem);
   });
 
