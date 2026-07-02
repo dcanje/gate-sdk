@@ -39,6 +39,7 @@ function crearMiddlewareBypass() {
       isRoot: true,
       role: 'admin',
       permissions: [],
+      scopes: [],
       appId: '_local',
     };
     next();

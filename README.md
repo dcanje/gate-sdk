@@ -159,6 +159,7 @@ Después del middleware (modo real), `req.user` contiene:
   role: 'vendedor',
   appId: 'cotizador-divisas',
   permissions: ['view:dashboard', 'edit:reportes'],
+  scopes: ['dimensión:valor1', 'dimensión:valor2'],
 }
 ```
 
@@ -171,9 +172,16 @@ En modo bypass (`bypass: true`):
   isRoot: true,
   role: 'admin',
   permissions: [],
+  scopes: [],
   appId: '_local',
 }
 ```
+
+**Notas sobre `scopes`:**
+- Array de strings con valores `dimensión:valor` definidos por cada aplicación. Ejemplo: `['region:LATAM', 'tenant:beta-store']`.
+- En modo real: proviene del JWT emitido por Gate.
+- En modo bypass: siempre un array vacío `[]`.
+- Si la aplicación no utiliza scopes, el array estará vacío.
 
 ## requirePermission y requireRole
 

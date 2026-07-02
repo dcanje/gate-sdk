@@ -102,6 +102,14 @@ describe('createGateMiddleware: validacion de inputs', () => {
     mw(m.req, m.res, m.next);
     expect(m.req.user.isRoot).toBe(true);
   });
+
+  test('bypass expone req.user.scopes = []', async () => {
+    const mw = await createGateMiddleware({ bypass: true });
+    const m = mockReqRes();
+    mw(m.req, m.res, m.next);
+    expect(m.nextCalled).toBe(true);
+    expect(m.req.user.scopes).toEqual([]);
+  });
 });
 
 describe('createGateMiddleware: verificacion de tokens', () => {
